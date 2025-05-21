@@ -11,12 +11,13 @@
 # ]
 # ///
 """
-Backend FastAPI para un servicio de OCR de PDF.
+Backend FastAPI para un servicio de OCR de PDF y servicio de frontend.
 
 Este servicio utiliza la librería PiscoMistralOcrClient para interactuar
 con la API de Mistral AI, permitiendo a los usuarios subir archivos PDF
 y obtener el texto extraído. La API key de Mistral es proporcionada
 por el usuario en cada solicitud y no se almacena en el servidor.
+Adicionalmente, sirve una interfaz de usuario frontend desde la carpeta 'front'.
 """
 
 import logging
@@ -40,6 +41,11 @@ from pisco_mistral_ocr import (
     PiscoMistralOcrClient,
 )
 
+# NUEVA IMPORTACIÓN para servir archivos estáticos
+from fastapi.staticfiles import StaticFiles
+# FileResponse podría ser útil para servir archivos individualmente si no se usa StaticFiles con html=True
+# from fastapi.responses import FileResponse, HTMLResponse 
+
 # Configuración del logger para este módulo.
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -52,10 +58,12 @@ logging.basicConfig(
 # Lista de orígenes permitidos para CORS.
 # En producción, esta lista DEBE restringirse a los dominios específicos
 # del frontend desplegado para mayor seguridad.
+# Si FastAPI sirve el frontend, las peticiones del JS al API serán del mismo origen.
 ALLOWED_ORIGINS: List[str] = [
     "http://localhost",
+    "http://localhost:8000", # Puerto por defecto de Uvicorn
     "http://localhost:8080",
-    "http://127.0.0.1:5500",
+    "http://127.0.0.1:5500", # Puede que ya no sea necesario si FastAPI sirve el frontend
     # "https://tu-app.netlify.app", # DESCOMENTAR Y AJUSTAR PARA PRODUCCIÓN
 ]
 
@@ -65,22 +73,22 @@ OCR_CLIENT_TIMEOUT: float = 300.0  # 5 minutos
 # --- Aplicación FastAPI ---
 
 app = FastAPI(
-    title="OCR PDF Service",
+    title="OCR PDF Service with Frontend",
     description=(
         "API para extraer texto de archivos PDF usando Mistral AI "
-        "a través de PiscoMistralOcrClient."
+        "a través de PiscoMistralOcrClient, y servir una interfaz de usuario."
     ),
     version="1.0.0",
 )
 
 # Configuración del Middleware CORS.
-# Permite que el frontend (servido desde un origen diferente) interactúe
+# Permite que el frontend (servido desde un origen diferente, o el mismo) interactúe
 # de forma segura con esta API.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "OPTIONS"], # Añadido GET para el frontend
     allow_headers=["Content-Type"],
 )
 
@@ -149,9 +157,6 @@ async def ocr_pdf_endpoint(
     """
     if not pdf_file.filename:
         logger.warning("Intento de subida de archivo PDF sin nombre.")
-        # Esta HTTPException será capturada y devuelta como está, lo cual es aceptable
-        # o podría ser convertida a JSONResponse si se desea uniformidad total.
-        # Por ahora, la dejamos así ya que es un error de cliente muy básico.
         raise HTTPException(
             status_code=400,
             detail="El archivo PDF debe tener un nombre." 
@@ -311,16 +316,50 @@ async def ocr_pdf_endpoint(
                     f"'{pdf_file.filename}': {e_close}"
                 )
 
+# --- Servir archivos estáticos del Frontend ---
+# Determinar la ruta al directorio 'front'
+# Asumiendo que este archivo (main.py) está en 'mistral-pdf-convert/back/main.py'
+CURRENT_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# PROJECT_ROOT_DIR será 'mistral-pdf-convert'
+PROJECT_ROOT_DIR = os.path.dirname(CURRENT_SCRIPT_DIR)
+# FRONTEND_DIR será 'mistral-pdf-convert/front'
+FRONTEND_DIR = os.path.join(PROJECT_ROOT_DIR, "front")
+
+# Comprobar si el directorio del frontend existe
+if not os.path.isdir(FRONTEND_DIR):
+    logger.error(
+        f"El directorio del frontend '{FRONTEND_DIR}' no se encontró. "
+        "Los archivos estáticos no se servirán. "
+        "Asegúrate de que la estructura de carpetas es correcta: ./back/main.py y ./front/"
+    )
+else:
+    # Montar la carpeta 'front' para servir archivos estáticos.
+    # html=True permite que sirva 'index.html' para el path '/' por defecto.
+    # También servirá style.css en /style.css y script.js en /script.js
+    # si index.html los referencia de forma relativa (ej: <link href="style.css">).
+    # Esta línea debe ir después de la definición de las rutas API para evitar conflictos,
+    # aunque con el prefijo /api/ para las rutas API, no debería haber problema.
+    try:
+        app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+        logger.info(f"Archivos estáticos del frontend montados desde: {FRONTEND_DIR}")
+        logger.info(f"Accede al frontend en la raíz (ej. http://localhost:8000/)")
+    except RuntimeError as e_mount:
+        logger.error(f"Error al montar archivos estáticos desde '{FRONTEND_DIR}': {e_mount}")
+
+
 # Adaptador Mangum para AWS Lambda (Netlify Functions).
+# Esto debe ir después de toda la configuración de la app.
 handler = Mangum(app)
 
 # Bloque para desarrollo local con Uvicorn.
 if __name__ == "__main__":
     import uvicorn
-    logger.info("Iniciando servidor Uvicorn para desarrollo local en puerto 8000.")
+    logger.info("Iniciando servidor Uvicorn para desarrollo local.")
+    # Asegúrate de que Uvicorn recarga los cambios si es necesario durante el desarrollo.
+    # El host 0.0.0.0 permite el acceso desde otras máquinas en la red local.
     uvicorn.run(
-        "main:app",
+        "main:app", # 'main' es el nombre de este archivo (main.py), 'app' es el objeto FastAPI
         host="0.0.0.0",
         port=8000,
-        reload=True
+        reload=True # Habilita la recarga automática en desarrollo
     )

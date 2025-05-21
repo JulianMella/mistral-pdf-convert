@@ -25,47 +25,20 @@ body {
     flex-direction: column;
 }
 
+#upload-form {
+    display: flex;
+    justify-content: center;
+    flex-direction: column;
+    height: 200px;
+    justify-content: space-evenly;
+}
+
 .title {
     text-align: center;
     color: white;
 }
-
-.api-form {
-  display: flex;
-  max-width: 500px;
-  margin: 2rem auto;
-  background: white;
-  border: 1px solid #ccc;
-  border-radius: 6px;
-  overflow: hidden;
-}
-
-.api-form input[type="text"] {
-  flex: 1;
-  padding: 0.75rem 1rem;
-  border: none;
-  outline: none;
-  font-size: 1rem;
-}
-
-.api-form button {
-  padding: 0 1.5rem;
-  border: none;
-  background: #007BFF;
-  color: white;
-  font-size: 1rem;
-  cursor: pointer;
-  transition: background 0.2s;
-}
-
-.api-form button:hover {
-  background: #0056b3;
-}
-
-.get-api-key {
-    text-decoration: none;
-    color: white;
-    padding-bottom: 20px;
+#file-input {
+    display: none;
 }
 
 .title-mistral-api-key {

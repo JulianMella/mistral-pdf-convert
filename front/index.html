@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mistral OCR PDF -> MD</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="contents" id="contents">
+        <div class="title">PDF to Markdown Converter<br>with Mistral OCR</div>
+        <div class="input-box">
+            <p class="title-mistral-api-key">Enter your Mistral API Key</p>
+
+            <form id="upload-form">
+                <input type="file" id="file-input" name="file" accept=".pdf"/>
+                <button type="submit">Upload</button>
+            </form>
+
+            <form id="api-form-js" class="api-form">
+                <input type="text" name="apiKey" placeholder="Enter API key" required>
+                <button type="submit">Submit</button>
+            </form>
+
+
+
+            <a href="" class="get-api-key">How to get Mistral API Key?</a>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

@@ -1,8 +1,10 @@
 document.addEventListener('DOMContentLoaded', () => {
+    let downloadImages = false;
 
     const fileButton = document.getElementById('file-button');
     const fileInput = document.getElementById('file-input');
     const form = document.getElementById('upload-form');
+    const checked = document.getElementById('myCheckbox');
 
     fileButton.addEventListener('click', () => fileInput.click());
 
@@ -14,17 +16,23 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    checked.addEventListener('change', function() {
+        downloadImages = !downloadImages;
+        console.log("Checkbox checked, download images is now: ", downloadImages);
+    })
+
 
     form.addEventListener('submit', function(event) {
         event.preventDefault();
 
-        const apiKey = form.apiKey.value;
         const pdfFile = document.getElementById('file-input').files[0];
+        const apiKey = form.apiKey.value;
         const formData = new FormData();
         formData.append('api_key', apiKey);
         formData.append('pdf_file', pdfFile);
+        formData.append('include_images', downloadImages)
 
-        fetch('http://127.0.0.1:8001/api/ocr-pdf', {
+        fetch('http://127.0.0.1:8000/api/ocr-pdf', {
             method: 'POST',
             body: formData,
         })

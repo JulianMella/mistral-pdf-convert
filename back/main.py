@@ -18,13 +18,14 @@ con la API de Mistral AI, permitiendo a los usuarios subir archivos PDF
 y obtener el texto extraído. La API key de Mistral es proporcionada
 por el usuario en cada solicitud y no se almacena en el servidor.
 Adicionalmente, sirve una interfaz de usuario frontend desde la carpeta 'front'.
+La respuesta incluye datos estructurados por página.
 """
 
 import logging
 import os
 import shutil
 import tempfile
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional # Añadido Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request
 from fastapi.exceptions import RequestValidationError
@@ -39,12 +40,12 @@ from pisco_mistral_ocr import (
     FileError as PiscoFileError,
     NetworkError as PiscoNetworkError,
     PiscoMistralOcrClient,
+    OcrPage as PiscoOcrPage, # Importar para type hinting si es necesario
+    # OcrImage as PiscoOcrImage # Importar si tienes este modelo definido en tu librería
 )
 
 # NUEVA IMPORTACIÓN para servir archivos estáticos
 from fastapi.staticfiles import StaticFiles
-# FileResponse podría ser útil para servir archivos individualmente si no se usa StaticFiles con html=True
-# from fastapi.responses import FileResponse, HTMLResponse 
 
 # Configuración del logger para este módulo.
 logger = logging.getLogger(__name__)
@@ -54,57 +55,39 @@ logging.basicConfig(
 )
 
 # --- Constantes y Configuración Global ---
-
-# Lista de orígenes permitidos para CORS.
-# En producción, esta lista DEBE restringirse a los dominios específicos
-# del frontend desplegado para mayor seguridad.
-# Si FastAPI sirve el frontend, las peticiones del JS al API serán del mismo origen.
 ALLOWED_ORIGINS: List[str] = [
     "http://localhost",
-    "http://localhost:8000", # Puerto por defecto de Uvicorn
+    "http://localhost:8000",
     "http://localhost:8080",
-    "http://127.0.0.1:5500", # Puede que ya no sea necesario si FastAPI sirve el frontend
-    # "https://tu-app.netlify.app", # DESCOMENTAR Y AJUSTAR PARA PRODUCCIÓN
+    "http://127.0.0.1:5500",
+    # "https://tu-app.netlify.app",
 ]
-
-# Timeout para las operaciones del cliente OCR en segundos.
-OCR_CLIENT_TIMEOUT: float = 300.0  # 5 minutos
+OCR_CLIENT_TIMEOUT: float = 300.0
 
 # --- Aplicación FastAPI ---
-
 app = FastAPI(
     title="OCR PDF Service with Frontend",
     description=(
         "API para extraer texto de archivos PDF usando Mistral AI "
-        "a través de PiscoMistralOcrClient, y servir una interfaz de usuario."
+        "a través de PiscoMistralOcrClient, y servir una interfaz de usuario. "
+        "Devuelve datos estructurados por página."
     ),
-    version="1.0.0",
+    version="1.1.0", # Versión actualizada para reflejar cambios
 )
 
-# Configuración del Middleware CORS.
-# Permite que el frontend (servido desde un origen diferente, o el mismo) interactúe
-# de forma segura con esta API.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"], # Añadido GET para el frontend
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
 
-
 # --- Manejadores de Excepciones Personalizados ---
-
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
-    """
-    Manejador personalizado para los errores de validación de FastAPI (422).
-
-    Formatea la respuesta para que coincida con la estructura esperada por
-    los tests del frontend: `{"success": false, "error": "mensaje..."}`.
-    """
     error_messages = [err["msg"] for err in exc.errors()]
     primary_error_message = "Error de validación en la solicitud."
     if error_messages:
@@ -116,7 +99,7 @@ async def validation_exception_handler(
             if "pdf_file" in loc:
                 primary_error_message = "El campo 'pdf_file' es requerido o inválido."
                 break
-        else: 
+        else:
             primary_error_message = error_messages[0]
 
     logger.warning(
@@ -128,17 +111,15 @@ async def validation_exception_handler(
         content={"success": False, "error": primary_error_message},
     )
 
-
 # --- Endpoints de la API ---
-
 @app.post(
     "/api/ocr-pdf",
     summary="Procesa un archivo PDF para realizar OCR.",
     description=(
-        "Recibe una API Key de Mistral AI y un archivo PDF, realiza OCR "
-        "y devuelve el texto extraído."
+        "Recibe una API Key de Mistral AI, un archivo PDF y una opción para incluir imágenes. "
+        "Realiza OCR y devuelve el texto y las imágenes (opcional) extraídos, estructurados por página."
     ),
-    response_model=None, # Se define la respuesta explícitamente, incluyendo errores
+    response_model=None,
     tags=["OCR"],
 )
 async def ocr_pdf_endpoint(
@@ -151,17 +132,17 @@ async def ocr_pdf_endpoint(
         ...,
         description="Archivo PDF a procesar."
     ),
-) -> JSONResponse: # Cambiado para reflejar que siempre devolvemos JSONResponse
-    """
-    Procesa un archivo PDF subido para extraer su texto usando Mistral AI.
-    """
+    include_images: bool = Form( # Nuevo parámetro
+        False,
+        description="Indica si se deben incluir las imágenes extraídas del PDF en la respuesta."
+    )
+) -> JSONResponse:
     if not pdf_file.filename:
         logger.warning("Intento de subida de archivo PDF sin nombre.")
         raise HTTPException(
             status_code=400,
-            detail="El archivo PDF debe tener un nombre." 
+            detail="El archivo PDF debe tener un nombre."
         )
-
 
     if pdf_file.content_type != "application/pdf":
         logger.warning(
@@ -169,21 +150,22 @@ async def ocr_pdf_endpoint(
             f"inesperado: '{pdf_file.content_type}'. Se intentará procesar."
         )
 
-    tmp_file_path: str | None = None
+    tmp_file_path: Optional[str] = None
     try:
-        with tempfile.NamedTemporaryFile(
-            delete=False, suffix=".pdf"
-        ) as tmp_file_obj:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file_obj:
             shutil.copyfileobj(pdf_file.file, tmp_file_obj)
             tmp_file_path = tmp_file_obj.name
 
         api_key_suffix = api_key[-4:] if len(api_key) >= 4 else "..."
         logger.info(
             f"Archivo PDF '{pdf_file.filename}' guardado temporalmente en "
-            f"'{tmp_file_path}'. API Key (parcial): ...{api_key_suffix}"
+            f"'{tmp_file_path}'. API Key (parcial): ...{api_key_suffix}. "
+            f"Incluir imágenes: {include_images}"
         )
 
-        extracted_text = ""
+        processed_pages_data: List[Dict[str, Any]] = []
+        concatenated_markdown = ""
+
         async with PiscoMistralOcrClient(
             api_key=api_key, timeout=OCR_CLIENT_TIMEOUT
         ) as client:
@@ -192,7 +174,9 @@ async def ocr_pdf_endpoint(
                 f"(timeout: {OCR_CLIENT_TIMEOUT}s)."
             )
             ocr_result = await client.ocr(
-                tmp_file_path, delete_after_processing=True
+                tmp_file_path,
+                include_image_base64=include_images,
+                delete_after_processing=True # Manteniendo tu default
             )
             logger.info(
                 f"OCR completado para '{tmp_file_path}'. Archivo en Mistral "
@@ -200,20 +184,51 @@ async def ocr_pdf_endpoint(
             )
 
             if ocr_result and ocr_result.pages:
-                page_texts = [
-                    page.markdown
-                    for page in ocr_result.pages
-                    if page.markdown
-                ]
-                extracted_text = "\n\n".join(page_texts)
-                if not extracted_text.strip():
+                all_page_markdowns: List[str] = []
+                for page_idx, pisco_page in enumerate(ocr_result.pages):
+                    page_data: Dict[str, Any] = {
+                        "page_number": pisco_page.index if pisco_page.index is not None else page_idx,
+                        "markdown": pisco_page.markdown or ""
+                    }
+                    all_page_markdowns.append(pisco_page.markdown or "")
+
+                    if include_images and pisco_page.images:
+                        page_data["images"] = []
+                        for img_obj in pisco_page.images:
+                            # Ajustar según la estructura real de img_obj devuelta por PiscoMistralOcrClient
+                            # Si img_obj es una instancia de un modelo Pydantic (ej. OcrImage), puedes usar .model_dump()
+                            # o acceder a sus atributos directamente.
+                            if hasattr(img_obj, 'content_base64') and hasattr(img_obj, 'mime_type'):
+                                page_data["images"].append({
+                                    "content_base64": img_obj.content_base64,
+                                    "mime_type": img_obj.mime_type or "application/octet-stream"
+                                })
+                            elif isinstance(img_obj, dict) and "content_base64" in img_obj:
+                                page_data["images"].append({
+                                    "content_base64": img_obj["content_base64"],
+                                    "mime_type": img_obj.get("mime_type", "application/octet-stream")
+                                })
+                            elif isinstance(img_obj, str): # Fallback si es solo una string base64
+                                page_data["images"].append({
+                                    "content_base64": img_obj,
+                                    "mime_type": "application/octet-stream" # Asume tipo genérico
+                                })
+                            else:
+                                logger.warning(f"Objeto de imagen inesperado en la página {page_idx}: {type(img_obj)}")
+                    
+                    processed_pages_data.append(page_data)
+                
+                concatenated_markdown = "\n\n".join(all_page_markdowns)
+
+                if not concatenated_markdown.strip() and not any(p.get("images") for p in processed_pages_data if include_images):
                     logger.warning(
                         f"OCR para '{pdf_file.filename}' produjo páginas pero "
-                        "sin contenido de texto markdown extraíble."
+                        "sin contenido de texto markdown extraíble ni imágenes (cuando solicitado)."
                     )
                 logger.info(
-                    f"Texto extraído para '{pdf_file.filename}'. "
-                    f"Longitud: {len(extracted_text)} caracteres."
+                    f"Datos extraídos para '{pdf_file.filename}'. "
+                    f"Número de páginas procesadas: {len(processed_pages_data)}. "
+                    f"Longitud total del markdown: {len(concatenated_markdown)} caracteres."
                 )
             else:
                 logger.warning(
@@ -226,75 +241,48 @@ async def ocr_pdf_endpoint(
             content={
                 "success": True,
                 "fileName": pdf_file.filename,
-                "text": extracted_text,
+                "pages": processed_pages_data,
+                "concatenated_text": concatenated_markdown, # Para posible uso/compatibilidad del frontend
             }
         )
 
     except PiscoConfigurationError as e:
         error_msg = f"Error de configuración del cliente OCR: {str(e)}"
         logger.error(f"{error_msg} (Archivo: '{pdf_file.filename}')")
-        return JSONResponse(
-            status_code=400, # Error de cliente por configuración incorrecta
-            content={"success": False, "error": error_msg},
-        )
+        return JSONResponse(status_code=400, content={"success": False, "error": error_msg})
     except PiscoFileError as e:
         error_msg = "Error de archivo interno del servidor al procesar para OCR."
         logger.error(f"{error_msg} Detalles: {str(e)} (Archivo: '{pdf_file.filename}')")
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": error_msg},
-        )
+        return JSONResponse(status_code=500, content={"success": False, "error": error_msg})
     except PiscoNetworkError as e:
         error_msg = "Error de red o timeout al contactar el servicio OCR de Mistral."
         logger.error(f"{error_msg} Detalles: {str(e)} (Archivo: '{pdf_file.filename}')")
-        return JSONResponse(
-            status_code=504, # Gateway Timeout
-            content={"success": False, "error": error_msg},
-        )
+        return JSONResponse(status_code=504, content={"success": False, "error": error_msg})
     except PiscoApiError as e:
         logger.error(
             f"Error API Mistral para '{pdf_file.filename}'. Status: {e.status_code}, "
             f"Details: {e.error_details}. Error: {e}"
         )
-        status_code = e.status_code or 500 # Default a 500 si no hay status_code
-        
+        status_code = e.status_code or 500
+        detail_msg = f"Error de la API de Mistral ({status_code}): {e.error_details or str(e)}"
         if e.status_code == 401:
             detail_msg = "API Key de Mistral AI inválida o no autorizada."
-        elif e.status_code in [400, 422]: # Errores de solicitud a Mistral
-            detail_msg = (
-                f"Error de la API de Mistral (solicitud o archivo no "
-                f"procesable): {e.error_details or str(e)}"
-            )
-        elif e.status_code and e.status_code >= 500: # Errores del servidor Mistral
-            detail_msg = (
-                f"Error del servidor OCR de Mistral: {e.error_details or str(e)}"
-            )
-        else: # Otros errores de la API de Mistral
-            detail_msg = (
-                f"Error de la API de Mistral ({status_code}): "
-                f"{e.error_details or str(e)}"
-            )
+        elif e.status_code in [400, 422]:
+            detail_msg = f"Error de la API de Mistral (solicitud o archivo no procesable): {e.error_details or str(e)}"
+        elif e.status_code and e.status_code >= 500:
+            detail_msg = f"Error del servidor OCR de Mistral: {e.error_details or str(e)}"
         
-        return JSONResponse(
-            status_code=status_code,
-            content={"success": False, "error": detail_msg}
-        )
-
+        return JSONResponse(status_code=status_code, content={"success": False, "error": detail_msg})
     except HTTPException:
-        # Re-lanzar HTTPExceptions que queremos que FastAPI maneje por defecto
-        # (como la de nombre de archivo faltante).
         raise
     except Exception as e:
         logger.error(
             f"Error inesperado procesando '{pdf_file.filename}': {e}",
-            exc_info=True, # Incluir traceback en el log
+            exc_info=True,
         )
         return JSONResponse(
             status_code=500,
-            content={
-                "success": False,
-                "error": "Ocurrió un error inesperado en el servidor."
-            }
+            content={"success": False, "error": "Ocurrió un error inesperado en el servidor."}
         )
     finally:
         if tmp_file_path and os.path.exists(tmp_file_path):
@@ -302,43 +290,32 @@ async def ocr_pdf_endpoint(
                 os.unlink(tmp_file_path)
                 logger.info(f"Archivo temporal '{tmp_file_path}' eliminado.")
             except OSError as e_unlink:
-                logger.error(
-                    f"Error al eliminar el archivo temporal "
-                    f"'{tmp_file_path}': {e_unlink}"
-                )
-        if hasattr(pdf_file, 'file') and hasattr(pdf_file.file, 'close'):
+                logger.error(f"Error al eliminar el archivo temporal '{tmp_file_path}': {e_unlink}")
+        
+        # Asegurar que el archivo subido se cierra
+        if pdf_file and hasattr(pdf_file, 'file') and hasattr(pdf_file.file, 'close'):
             try:
                 if not pdf_file.file.closed: # type: ignore
-                    pdf_file.file.close()
+                    await pdf_file.close() # Usar await si pdf_file.close es un método async
+                    # Si pdf_file.file.close() es síncrono y el archivo fue abierto por FastAPI
+                    # a menudo se cierra automáticamente o no necesita ser cerrado explícitamente aquí.
+                    # Pero por seguridad, si es un stream que controlamos (como el tmp_file), cerrarlo es bueno.
+                    # UploadFile.file es un SpooledTemporaryFile, que se limpia al cerrarse.
             except Exception as e_close:
-                logger.warning(
-                    f"Error al intentar cerrar el archivo subido "
-                    f"'{pdf_file.filename}': {e_close}"
-                )
+                logger.warning(f"Error al intentar cerrar el archivo subido '{pdf_file.filename}': {e_close}")
+
 
 # --- Servir archivos estáticos del Frontend ---
-# Determinar la ruta al directorio 'front'
-# Asumiendo que este archivo (main.py) está en 'mistral-pdf-convert/back/main.py'
 CURRENT_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-# PROJECT_ROOT_DIR será 'mistral-pdf-convert'
 PROJECT_ROOT_DIR = os.path.dirname(CURRENT_SCRIPT_DIR)
-# FRONTEND_DIR será 'mistral-pdf-convert/front'
 FRONTEND_DIR = os.path.join(PROJECT_ROOT_DIR, "front")
 
-# Comprobar si el directorio del frontend existe
 if not os.path.isdir(FRONTEND_DIR):
     logger.error(
         f"El directorio del frontend '{FRONTEND_DIR}' no se encontró. "
-        "Los archivos estáticos no se servirán. "
-        "Asegúrate de que la estructura de carpetas es correcta: ./back/main.py y ./front/"
+        "Los archivos estáticos no se servirán."
     )
 else:
-    # Montar la carpeta 'front' para servir archivos estáticos.
-    # html=True permite que sirva 'index.html' para el path '/' por defecto.
-    # También servirá style.css en /style.css y script.js en /script.js
-    # si index.html los referencia de forma relativa (ej: <link href="style.css">).
-    # Esta línea debe ir después de la definición de las rutas API para evitar conflictos,
-    # aunque con el prefijo /api/ para las rutas API, no debería haber problema.
     try:
         app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
         logger.info(f"Archivos estáticos del frontend montados desde: {FRONTEND_DIR}")
@@ -346,20 +323,16 @@ else:
     except RuntimeError as e_mount:
         logger.error(f"Error al montar archivos estáticos desde '{FRONTEND_DIR}': {e_mount}")
 
-
-# Adaptador Mangum para AWS Lambda (Netlify Functions).
-# Esto debe ir después de toda la configuración de la app.
+# Adaptador Mangum para AWS Lambda
 handler = Mangum(app)
 
-# Bloque para desarrollo local con Uvicorn.
+# Bloque para desarrollo local con Uvicorn
 if __name__ == "__main__":
     import uvicorn
     logger.info("Iniciando servidor Uvicorn para desarrollo local.")
-    # Asegúrate de que Uvicorn recarga los cambios si es necesario durante el desarrollo.
-    # El host 0.0.0.0 permite el acceso desde otras máquinas en la red local.
     uvicorn.run(
-        "main:app", # 'main' es el nombre de este archivo (main.py), 'app' es el objeto FastAPI
+        "main:app",
         host="0.0.0.0",
         port=8000,
-        reload=True # Habilita la recarga automática en desarrollo
+        reload=True
     )

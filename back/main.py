@@ -26,6 +26,7 @@ import os
 import shutil
 import tempfile
 from typing import Dict, Any, List, Optional 
+from datetime import datetime
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request
 from fastapi.exceptions import RequestValidationError
@@ -324,6 +325,11 @@ async def ocr_pdf_endpoint(
                      logger.debug(f"Closed UploadFile '{pdf_file.filename}'.") # logger.debug para no ser verboso en INFO
             except Exception as e_close:
                 logger.warning(f"Error al intentar cerrar el archivo subido '{pdf_file.filename}': {e_close}")
+
+# Este endpoint me da la hora
+@app.get("/hora")
+async def get_hora():
+    return {"hora": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
 
 # --- Servir archivos estáticos del Frontend ---
